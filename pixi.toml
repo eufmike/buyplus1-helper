@@ -1,0 +1,31 @@
+[workspace]
+name = "buyplus1-helper"
+version = "0.1.0"
+channels = ["conda-forge"]
+platforms = ["osx-arm64", "osx-64", "linux-64"]
+
+[dependencies]
+python = ">=3.11"
+pip = "*"
+
+[pypi-dependencies]
+buyplus1-helper = { path = ".", editable = true }
+typer = ">=0.12"
+pydantic = ">=2.0"
+pandas = ">=2.0"
+openpyxl = ">=3.1"
+rich = ">=13"
+
+[feature.test.pypi-dependencies]
+pytest = ">=8"
+pytest-cov = "*"
+
+[feature.test.tasks]
+test = "pytest tests/ -v --cov=buyplus1_helper"
+
+[environments]
+default = { features = [], solve-group = "default" }
+test = { features = ["test"], solve-group = "default" }
+
+[tasks]
+timecard = "python -m buyplus1_helper.cli"

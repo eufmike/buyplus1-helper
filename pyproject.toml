@@ -1,0 +1,25 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "buyplus1-helper"
+version = "0.1.0"
+description = "Tools to assist buyplus1 team operations"
+requires-python = ">=3.11"
+dependencies = [
+    "typer>=0.12",
+    "pydantic>=2.0",
+    "pandas>=2.0",
+    "openpyxl>=3.1",
+    "rich>=13",
+]
+
+[project.scripts]
+timecard = "buyplus1_helper.cli:app"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/buyplus1_helper"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
