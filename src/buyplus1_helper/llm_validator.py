@@ -3,38 +3,60 @@
 Used when a message contains 上線 in a time-deferred context (e.g. 「我10分鐘後上線」)
 that cannot be reliably classified by keyword rules alone.
 
-Results are cached to a JSON file so the same message content is never sent to
-the API more than once across multiple runs.
+Backend: Google Gemini (GEMINI_API_KEY from .env).
+Results are cached to a JSON file so the same message is never sent to the API
+more than once across multiple runs.
 """
 from __future__ import annotations
 
 import json
 import logging
+import os
 from pathlib import Path
 from typing import Optional
 
 logger = logging.getLogger(__name__)
 
-_SYSTEM_PROMPT = """\
-你是一個分類器，專門判斷繁體中文訊息中「上線」的意圖。
-只有兩種答案：
-- "now"   → 這個人「現在」正在上線（即使訊息中說「等一下」也算，只要她確認正在登入）
-- "future" → 這個人「之後」才會上線（尚未登入，只是預告或說明）
+_SYSTEM_PROMPT = (
+    "你是一個分類器，專門判斷繁體中文訊息中「上線」的意圖。\n"
+    "只有兩種答案：\n"
+    "- now    → 這個人「現在」正在上線\n"
+    "- future → 這個人「之後」才會上線（尚未登入，只是預告）\n"
+    "只回答一個英文單字：now 或 future。不要有其他文字。"
+)
 
-只回答一個英文單字：now 或 future。不要有其他文字。"""
+_DEFAULT_MODEL = "gemini-2.5-flash-lite"
+
+
+def _load_env() -> None:
+    """Load .env from the project root if python-dotenv is available."""
+    try:
+        from dotenv import load_dotenv
+
+        # Walk up from this file to find .env
+        here = Path(__file__).resolve()
+        for parent in [here.parent, here.parent.parent, here.parent.parent.parent]:
+            env_file = parent / ".env"
+            if env_file.exists():
+                load_dotenv(env_file)
+                return
+    except ImportError:
+        pass  # python-dotenv not installed — rely on env vars set externally
 
 
 class LLMValidator:
-    """Classify ambiguous 上線 messages via Claude API with local JSON cache."""
+    """Classify ambiguous 上線 messages via Gemini API with local JSON cache."""
 
     def __init__(
         self,
         cache_path: Optional[Path] = None,
-        model: str = "claude-haiku-4-5",
+        model: str = _DEFAULT_MODEL,
     ) -> None:
         self._model = model
-        self._cache: dict[str, bool] = {}   # content → is_online_now
+        self._cache: dict[str, bool] = {}
         self._cache_path = cache_path
+
+        _load_env()
 
         if cache_path and cache_path.exists():
             try:
@@ -74,19 +96,29 @@ class LLMValidator:
     # ------------------------------------------------------------------
 
     def _call_api(self, content: str) -> bool:
-        """Call Claude and return True if answer is 'now'. Raises on API error."""
-        import anthropic  # lazy import — optional dependency
+        """Call Gemini and return True if answer is 'now'. Raises on error."""
+        from google import genai  # lazy import — google-genai package
+        from google.genai import types
 
-        client = anthropic.Anthropic()
-        response = client.messages.create(
+        api_key = os.environ.get("GEMINI_API_KEY")
+        if not api_key:
+            raise RuntimeError(
+                "GEMINI_API_KEY not set. Add it to .env or export it as an env var."
+            )
+
+        client = genai.Client(api_key=api_key)
+        response = client.models.generate_content(
             model=self._model,
-            max_tokens=10,
-            system=_SYSTEM_PROMPT,
-            messages=[{"role": "user", "content": content}],
+            contents=content,
+            config=types.GenerateContentConfig(
+                system_instruction=_SYSTEM_PROMPT,
+                max_output_tokens=10,
+                temperature=0.0,
+            ),
         )
-        answer = response.content[0].text.strip().lower()
+        answer = response.text.strip().lower()
         is_now = answer.startswith("now")
-        logger.debug("LLM %r → %s", content[:50], "now" if is_now else "future")
+        logger.debug("Gemini %r → %s", content[:50], "now" if is_now else "future")
         return is_now
 
     def _save_cache(self) -> None:
