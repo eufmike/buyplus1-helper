@@ -96,8 +96,35 @@ def _is_ambiguous_online(msg: ChatMessage) -> bool:
     return any(pat in content for pat in _AMBIGUOUS_PATTERNS)
 
 
+# Substrings whose presence (in 曉寒's message) marks a departure.
+# Order matters for readability; all are checked with `in`.
+_OFFLINE_KEYWORDS: tuple[str, ...] = (
+    "下線",     # canonical: 先下線, 我先下線, 下線囉, …
+    "離線",     # alternative: 先離線一下, 我先離線, …
+    "離開",     # common in 2024–2026: 我先離開一下, 先離開, …
+    "先下",     # short form: 我先下, 先下喔, 先下囉, 先下一下, …
+    "下囉",     # sentence-final: 好啦～那我下囉, 先下囉, …
+    "下喔",     # sentence-final with 喔: 先下喔, …
+    "去接小孩", # specific activity: 我先去接小孩, …
+    "先來嚇了", # typo for 先來下了 (autocorrect artefact)
+)
+
+# Substrings that cancel an otherwise-matched offline keyword.
+# E.g. 來下載 contains 來下 but is a download, not a logout.
+_OFFLINE_EXCLUSIONS: tuple[str, ...] = (
+    "來下載",   # download
+    "先下午",   # 先下午…
+)
+
+
 def _is_offline(msg: ChatMessage) -> bool:
-    return msg.sender == TARGET_SENDER and "下線" in msg.content
+    if msg.sender != TARGET_SENDER:
+        return False
+    content = msg.content
+    for excl in _OFFLINE_EXCLUSIONS:
+        if excl in content:
+            return False
+    return any(kw in content for kw in _OFFLINE_KEYWORDS)
 
 
 def extract_sessions(

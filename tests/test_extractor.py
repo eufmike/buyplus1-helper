@@ -84,6 +84,36 @@ def test_offline_wrong_sender():
     assert not _is_offline(_msg("❤️Candice❤️", "我先下線"))
 
 
+def test_offline_short_xia():
+    assert _is_offline(_msg("曉寒", "我先下"))
+
+
+def test_offline_short_xia_particle():
+    assert _is_offline(_msg("曉寒", "先下囉"))
+    assert _is_offline(_msg("曉寒", "先下喔"))
+
+
+def test_offline_likai():
+    assert _is_offline(_msg("曉寒", "我先離開一下"))
+
+
+def test_offline_lixian():
+    assert _is_offline(_msg("曉寒", "先離線一下，等等回來"))
+
+
+def test_offline_activity():
+    assert _is_offline(_msg("曉寒", "我先去接小孩"))
+
+
+def test_offline_typo_xia():
+    assert _is_offline(_msg("曉寒", "我先來嚇了"))
+
+
+def test_offline_no_download_false_positive():
+    # 來下載 contains 來下 but is a download action, not going offline
+    assert not _is_offline(_msg("曉寒", "我要來下載這個"))
+
+
 # --- extract_sessions ---
 
 def test_extract_sessions_count():
