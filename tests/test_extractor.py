@@ -34,6 +34,33 @@ def test_online_with_purpose():
 def test_online_excludes_conditional():
     assert not _is_online(_msg("曉寒", "我下午有空會再上線處理"))
 
+def test_online_excludes_future_late():
+    assert not _is_online(_msg("曉寒", "我晚一點上線喔"))
+
+def test_online_excludes_future_late2():
+    assert not _is_online(_msg("曉寒", "我今天會晚點上線"))
+
+def test_online_excludes_inability():
+    assert not _is_online(_msg("曉寒", "我上午沒辦法上線"))
+
+def test_online_excludes_future_later():
+    assert not _is_online(_msg("曉寒", "等等會上線"))
+
+def test_online_excludes_future_return():
+    assert not _is_online(_msg("曉寒", "我先下，等等再回來上線"))
+
+def test_online_typo_exact_only():
+    # Long message containing 上限 in a different context is NOT a login
+    assert not _is_online(_msg("曉寒", "如果是不一樣的話應該沒有上限～"))
+    assert not _is_online(_msg("曉寒", "我們超商取貨不付款是不是有金額上限啊？"))
+
+def test_online_anchor_overrides_exclusion():
+    # Message starts with 先上線 (anchor) — valid even though it also mentions 晚點
+    assert _is_online(_msg("曉寒", "先上線，晚上有事，會台灣時間11點後才再上線喔"))
+
+def test_online_anchor_start():
+    assert _is_online(_msg("曉寒", "上線，今天臨時有點事情，可能會晚點才上線"))
+
 
 def test_online_excludes_other_sender():
     assert not _is_online(_msg("Fangtzu Chang", "曉寒妳有再上線的話 麻煩幫忙催款"))

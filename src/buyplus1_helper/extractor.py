@@ -3,36 +3,97 @@ from __future__ import annotations
 
 from datetime import date, timedelta
 from itertools import groupby
-from typing import Optional
+from typing import TYPE_CHECKING, Optional
 
 from .models import ChatMessage, TimecardEntry
 
+if TYPE_CHECKING:
+    from .llm_validator import LLMValidator
+
 TARGET_SENDER = "曉寒"
 
-# Phrases that indicate a conditional/future online intention — not an actual login
-_ONLINE_EXCLUSIONS = (
-    "有空會再上線",
-    "有再上線的話",
+# Exact short messages that are confirmed typos for 上線
+_ONLINE_TYPO_EXACT: frozenset[str] = frozenset({"上限", "我上限"})
+
+# Messages starting with these are unambiguous current login announcements —
+# skip exclusion checks entirely.
+_ONLINE_ANCHORS: tuple[str, ...] = (
+    "上線",
+    "我上線",
+    "回來上線",
+    "先上線",
+    "我先上線",
+    "我回來上線",
 )
 
-# The typo 上限 is treated as 上線 when the sender is 曉寒
-_ONLINE_TYPO = "上限"
+# Phrases indicating a future/conditional/inability-to-go-online intent.
+# Checked only when no anchor is present at the start of the message.
+_ONLINE_EXCLUSIONS: tuple[str, ...] = (
+    "有空會再上線",
+    "有再上線的話",
+    "晚一點上線",
+    "晚點上線",
+    "才能上線",
+    "才會上線",
+    "沒辦法上線",
+    "等等上線",
+    "等等會上線",
+    "等等再回來上線",
+)
+
+# Patterns that pass keyword rules but are inherently ambiguous — require LLM.
+# Example: 「我10分鐘後上線」 「大概三個小時後上線喔」
+_AMBIGUOUS_PATTERNS: tuple[str, ...] = ("後上線",)
 
 
 def _is_online(msg: ChatMessage) -> bool:
+    """Return True if the message is a definitive current login (no LLM needed)."""
     if msg.sender != TARGET_SENDER:
         return False
-    content = msg.content
-    # Treat typo as online
-    if _ONLINE_TYPO in content and "下" not in content:
+    content = msg.content.strip()
+
+    # Exact typo match (short message only — avoids false positives like "金額上限")
+    if content in _ONLINE_TYPO_EXACT:
         return True
+
     if "上線" not in content:
         return False
-    # Exclude conditional/future phrases
+
+    # Unambiguous login announcement at the start — always valid
+    for anchor in _ONLINE_ANCHORS:
+        if content.startswith(anchor):
+            return True
+
+    # No anchor — check for future/conditional exclusion phrases
     for excl in _ONLINE_EXCLUSIONS:
         if excl in content:
             return False
+
+    # Ambiguous patterns should not be auto-accepted; defer to LLM
+    for pat in _AMBIGUOUS_PATTERNS:
+        if pat in content:
+            return False
+
     return True
+
+
+def _is_ambiguous_online(msg: ChatMessage) -> bool:
+    """Return True if the message needs LLM classification (deferred login intent)."""
+    if msg.sender != TARGET_SENDER:
+        return False
+    content = msg.content.strip()
+    if content in _ONLINE_TYPO_EXACT:
+        return False
+    if "上線" not in content:
+        return False
+    # Already handled as definitive online or exclusion
+    for anchor in _ONLINE_ANCHORS:
+        if content.startswith(anchor):
+            return False
+    for excl in _ONLINE_EXCLUSIONS:
+        if excl in content:
+            return False
+    return any(pat in content for pat in _AMBIGUOUS_PATTERNS)
 
 
 def _is_offline(msg: ChatMessage) -> bool:
@@ -40,13 +101,21 @@ def _is_offline(msg: ChatMessage) -> bool:
 
 
 def extract_sessions(
-    messages: list[ChatMessage], source_file: str = ""
+    messages: list[ChatMessage],
+    source_file: str = "",
+    llm_validator: Optional["LLMValidator"] = None,
 ) -> list[TimecardEntry]:
     """
     Extract online/offline sessions for 曉寒 from a list of ChatMessage objects.
 
     Sessions are paired greedily left-to-right within each calendar day.
     An unpaired online event produces a row with offline_time=None.
+
+    Args:
+        messages: Parsed chat messages.
+        source_file: Name of the source file (stored in each entry).
+        llm_validator: Optional LLMValidator for ambiguous 後上線 messages.
+                       When None, ambiguous messages are skipped.
     """
     entries: list[TimecardEntry] = []
 
@@ -63,6 +132,9 @@ def extract_sessions(
                 events.append(("online", msg))
             elif _is_offline(msg):
                 events.append(("offline", msg))
+            elif llm_validator and _is_ambiguous_online(msg):
+                if llm_validator.is_online_now(msg.content):
+                    events.append(("online", msg))
 
         # Pair greedily: online → offline → online → offline …
         session_num = 0

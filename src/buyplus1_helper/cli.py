@@ -10,8 +10,11 @@ from rich.console import Console
 from rich.table import Table
 
 from .extractor import extract_sessions
+from .llm_validator import LLMValidator
 from .parser import parse_file
 from .timecard import build_dataframe, export_excel, load_master, merge, save_master
+
+_DEFAULT_LLM_CACHE = Path("data/llm_cache.json")
 
 app = typer.Typer(
     name="timecard",
@@ -27,6 +30,12 @@ def parse(
     output: Optional[Path] = typer.Option(
         None, "--output", "-o", help="Output CSV path (default: <stem>_timecard.csv)"
     ),
+    llm_validate: bool = typer.Option(
+        False, "--llm-validate", help="Use LLM to classify ambiguous 後上線 messages"
+    ),
+    llm_cache: Path = typer.Option(
+        _DEFAULT_LLM_CACHE, "--llm-cache", help="Path to LLM result cache (JSON)"
+    ),
 ) -> None:
     """Parse a chat file and write a timecard CSV."""
     if not chat_file.exists():
@@ -34,14 +43,16 @@ def parse(
         raise typer.Exit(1)
 
     out_path = output or chat_file.with_name(chat_file.stem + "_timecard.csv")
+    validator = LLMValidator(cache_path=llm_cache) if llm_validate else None
 
     messages = parse_file(chat_file)
-    sessions = extract_sessions(messages, source_file=chat_file.name)
+    sessions = extract_sessions(messages, source_file=chat_file.name, llm_validator=validator)
     df = build_dataframe(sessions)
     save_master(df, out_path)
 
+    llm_note = " [dim](LLM validation on)[/dim]" if llm_validate else ""
     console.print(
-        f"[green]Parsed[/green] {len(sessions)} session(s) → [bold]{out_path}[/bold]"
+        f"[green]Parsed[/green] {len(sessions)} session(s) → [bold]{out_path}[/bold]{llm_note}"
     )
 
 
@@ -75,22 +86,31 @@ app.command(name="merge")(merge_cmd)
 def run(
     chat_file: Path = typer.Argument(..., help="Path to the LINE chat export .txt file"),
     master_csv: Path = typer.Argument(..., help="Master CSV path (created if missing)"),
+    llm_validate: bool = typer.Option(
+        False, "--llm-validate", help="Use LLM to classify ambiguous 後上線 messages"
+    ),
+    llm_cache: Path = typer.Option(
+        _DEFAULT_LLM_CACHE, "--llm-cache", help="Path to LLM result cache (JSON)"
+    ),
 ) -> None:
     """Parse a chat file and merge directly into the master (one-step convenience)."""
     if not chat_file.exists():
         console.print(f"[red]File not found:[/red] {chat_file}")
         raise typer.Exit(1)
 
+    validator = LLMValidator(cache_path=llm_cache) if llm_validate else None
+
     messages = parse_file(chat_file)
-    sessions = extract_sessions(messages, source_file=chat_file.name)
+    sessions = extract_sessions(messages, source_file=chat_file.name, llm_validator=validator)
     new_df = build_dataframe(sessions)
     master_df = load_master(master_csv)
     merged = merge(new_df, master_df)
     save_master(merged, master_csv)
 
+    llm_note = " [dim](LLM validation on)[/dim]" if llm_validate else ""
     console.print(
         f"[green]Done[/green] — {len(sessions)} session(s) parsed, "
-        f"{len(merged)} total row(s) in [bold]{master_csv}[/bold]"
+        f"{len(merged)} total row(s) in [bold]{master_csv}[/bold]{llm_note}"
     )
 
 

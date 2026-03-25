@@ -15,6 +15,7 @@ pydantic = ">=2.0"
 pandas = ">=2.0"
 openpyxl = ">=3.1"
 rich = ">=13"
+anthropic = ">=0.40"
 
 [feature.test.pypi-dependencies]
 pytest = ">=8"
