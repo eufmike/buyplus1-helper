@@ -26,5 +26,6 @@ class TimecardEntry(BaseModel):
     online_time: Optional[time] = None
     offline_time: Optional[time] = None
     duration_hours: Optional[float] = None
+    temp_leave_minutes: Optional[float] = None
     source_file: str
     notes: str = ""

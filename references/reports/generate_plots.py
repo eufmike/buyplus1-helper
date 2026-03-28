@@ -57,17 +57,20 @@ def load() -> pd.DataFrame:
     df["year"]    = df["date_dt"].dt.year
     df["weekday_n"] = df["date_dt"].dt.dayofweek  # 0=Mon
 
-    # Raw timestamps are Pacific Time (PT); GMT columns are pre-computed in the CSV.
+    # Raw timestamps are Pacific Time (PT); TW/GMT columns are pre-computed in the CSV.
     df["online_min"]      = df["online_time"].apply(_to_minutes)
     df["offline_min"]     = df["offline_time"].apply(_to_minutes)
+    df["online_min_tw"]   = df["online_time_tw"].apply(_to_minutes)
+    df["offline_min_tw"]  = df["offline_time_tw"].apply(_to_minutes)
     df["online_min_gmt"]  = df["online_time_gmt"].apply(_to_minutes)
     df["offline_min_gmt"] = df["offline_time_gmt"].apply(_to_minutes)
 
     df["has_offline"] = df["offline_time"].notna() & (df["offline_time"] != "")
     df["duration_h"]  = pd.to_numeric(df["duration_hours"], errors="coerce")
+    df["temp_leave_h"] = pd.to_numeric(df["temp_leave_minutes"], errors="coerce") / 60
 
-    # Online hour bucket (PT)
-    df["online_hour"] = (df["online_min"] // 60).where(df["online_min"].notna())
+    # Online hour bucket (Taiwan time — primary standard)
+    df["online_hour"] = (df["online_min_tw"] // 60).where(df["online_min_tw"].notna())
 
     # Weekday ordered label
     wd_order = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"]
@@ -106,89 +109,88 @@ def _hour_ticks(ax, which="x", label_tz="TW", step=3):
 def plot1(df: pd.DataFrame):
     plt.rcParams.update(REPORT_STYLE)
     fig = plt.figure(figsize=(16, 12))
-    fig.suptitle("Plot 1 — Session Start & End Time Distribution\n(Pacific Time vs GMT/UTC)",
+    fig.suptitle("Plot 1 — Session Start & End Time Distribution\n(Taiwan UTC+8 vs Pacific Time)",
                  fontsize=14, fontweight="bold", y=0.98)
 
     gs = fig.add_gridspec(2, 3, hspace=0.45, wspace=0.35)
-    ax_on_pt   = fig.add_subplot(gs[0, 0])
-    ax_off_pt  = fig.add_subplot(gs[0, 1])
+    ax_on_tw   = fig.add_subplot(gs[0, 0])
+    ax_off_tw  = fig.add_subplot(gs[0, 1])
     ax_dur     = fig.add_subplot(gs[0, 2])
-    ax_on_gmt  = fig.add_subplot(gs[1, 0])
-    ax_off_gmt = fig.add_subplot(gs[1, 1])
+    ax_on_pt   = fig.add_subplot(gs[1, 0])
+    ax_off_pt  = fig.add_subplot(gs[1, 1])
     ax_scatter = fig.add_subplot(gs[1, 2])
 
     bins = np.arange(0, 24 * 60 + 30, 30)  # 30-min bins
 
+    on_tw   = df["online_min_tw"].dropna()
+    off_tw  = df["offline_min_tw"].dropna()
     on_pt   = df["online_min"].dropna()
     off_pt  = df["offline_min"].dropna()
-    on_gmt  = df["online_min_gmt"].dropna()
-    off_gmt = df["offline_min_gmt"].dropna()
 
-    # ── Row 1: Pacific Time (raw data) ──────────────────────────────────────
-    ax_on_pt.hist(on_pt, bins=bins, color="#4C9BE8", edgecolor="white", linewidth=0.5)
-    ax_on_pt.set_title("Online time (Pacific PDT/PST)", fontweight="bold")
-    ax_on_pt.set_ylabel("Sessions")
-    _hour_ticks(ax_on_pt, "x", "PT")
+    # ── Row 1: Taiwan time (primary standard) ──────────────────────────────
+    ax_on_tw.hist(on_tw, bins=bins, color="#4C9BE8", edgecolor="white", linewidth=0.5)
+    ax_on_tw.set_title("Online time (Taiwan UTC+8)", fontweight="bold")
+    ax_on_tw.set_ylabel("Sessions")
+    _hour_ticks(ax_on_tw, "x", "TW")
 
-    med = on_pt.median()
-    ax_on_pt.axvline(med, color="#E84C4C", lw=1.5, linestyle="--",
+    med = on_tw.median()
+    ax_on_tw.axvline(med, color="#E84C4C", lw=1.5, linestyle="--",
                      label=f"Median {_min_to_hm(med)}")
-    ax_on_pt.legend(fontsize=8)
+    ax_on_tw.legend(fontsize=8)
 
-    ax_off_pt.hist(off_pt, bins=bins, color="#4CE8A0", edgecolor="white", linewidth=0.5)
-    ax_off_pt.set_title("Offline time (Pacific PDT/PST)", fontweight="bold")
-    ax_off_pt.set_ylabel("Sessions")
-    _hour_ticks(ax_off_pt, "x", "PT")
-    med_off = off_pt.median()
-    ax_off_pt.axvline(med_off, color="#E84C4C", lw=1.5, linestyle="--",
+    ax_off_tw.hist(off_tw, bins=bins, color="#4CE8A0", edgecolor="white", linewidth=0.5)
+    ax_off_tw.set_title("Offline time (Taiwan UTC+8)", fontweight="bold")
+    ax_off_tw.set_ylabel("Sessions")
+    _hour_ticks(ax_off_tw, "x", "TW")
+    med_off = off_tw.median()
+    ax_off_tw.axvline(med_off, color="#E84C4C", lw=1.5, linestyle="--",
                       label=f"Median {_min_to_hm(med_off)}")
-    ax_off_pt.legend(fontsize=8)
+    ax_off_tw.legend(fontsize=8)
 
     dur = df["duration_h"].dropna()
     ax_dur.hist(dur, bins=30, color="#C84CE8", edgecolor="white", linewidth=0.5)
-    ax_dur.set_title("Session length (hours)", fontweight="bold")
+    ax_dur.set_title("Session length — net working hours\n(excl. temp leave)", fontweight="bold")
     ax_dur.set_xlabel("Hours")
     ax_dur.set_ylabel("Sessions")
     ax_dur.axvline(dur.median(), color="#E84C4C", lw=1.5, linestyle="--",
                    label=f"Median {dur.median():.1f}h")
     ax_dur.legend(fontsize=8)
 
-    # ── Row 2: GMT/UTC (converted in CSV) ──────────────────────────────────
-    ax_on_gmt.hist(on_gmt, bins=bins, color="#4C9BE8", edgecolor="white", linewidth=0.5, alpha=0.85)
-    ax_on_gmt.set_title("Online time (GMT/UTC)", fontweight="bold")
-    ax_on_gmt.set_ylabel("Sessions")
-    _hour_ticks(ax_on_gmt, "x", "GMT")
-    med_gmt = on_gmt.median()
-    ax_on_gmt.axvline(med_gmt, color="#E84C4C", lw=1.5, linestyle="--",
-                      label=f"Median {_min_to_hm(med_gmt)}")
-    ax_on_gmt.legend(fontsize=8)
+    # ── Row 2: Pacific Time (raw source) ───────────────────────────────────
+    ax_on_pt.hist(on_pt, bins=bins, color="#4C9BE8", edgecolor="white", linewidth=0.5, alpha=0.85)
+    ax_on_pt.set_title("Online time (Pacific PDT/PST)", fontweight="bold")
+    ax_on_pt.set_ylabel("Sessions")
+    _hour_ticks(ax_on_pt, "x", "PT")
+    med_pt = on_pt.median()
+    ax_on_pt.axvline(med_pt, color="#E84C4C", lw=1.5, linestyle="--",
+                     label=f"Median {_min_to_hm(med_pt)}")
+    ax_on_pt.legend(fontsize=8)
 
-    ax_off_gmt.hist(off_gmt, bins=bins, color="#4CE8A0", edgecolor="white", linewidth=0.5, alpha=0.85)
-    ax_off_gmt.set_title("Offline time (GMT/UTC)", fontweight="bold")
-    ax_off_gmt.set_ylabel("Sessions")
-    _hour_ticks(ax_off_gmt, "x", "GMT")
-    med_off_gmt = off_gmt.median()
-    ax_off_gmt.axvline(med_off_gmt, color="#E84C4C", lw=1.5, linestyle="--",
-                       label=f"Median {_min_to_hm(med_off_gmt)}")
-    ax_off_gmt.legend(fontsize=8)
+    ax_off_pt.hist(off_pt, bins=bins, color="#4CE8A0", edgecolor="white", linewidth=0.5, alpha=0.85)
+    ax_off_pt.set_title("Offline time (Pacific PDT/PST)", fontweight="bold")
+    ax_off_pt.set_ylabel("Sessions")
+    _hour_ticks(ax_off_pt, "x", "PT")
+    med_off_pt = off_pt.median()
+    ax_off_pt.axvline(med_off_pt, color="#E84C4C", lw=1.5, linestyle="--",
+                      label=f"Median {_min_to_hm(med_off_pt)}")
+    ax_off_pt.legend(fontsize=8)
 
-    # ── Scatter: online vs offline (PT) ─────────────────────────────────────
-    paired = df.dropna(subset=["online_min", "offline_min"])
-    ax_scatter.scatter(paired["online_min"], paired["offline_min"],
+    # ── Scatter: online vs offline (Taiwan) ────────────────────────────────
+    paired = df.dropna(subset=["online_min_tw", "offline_min_tw"])
+    ax_scatter.scatter(paired["online_min_tw"], paired["offline_min_tw"],
                        alpha=0.35, s=18, color="#4C9BE8", edgecolors="none")
-    # diagonal (equal start=end)
     ax_scatter.plot([0, 24*60], [0, 24*60], "k--", lw=0.7, alpha=0.4)
-    ax_scatter.set_title("Online vs Offline time (Pacific PT)", fontweight="bold")
-    _hour_ticks(ax_scatter, "x", "PT (start)")
-    _hour_ticks(ax_scatter, "y", "PT (end)")
+    ax_scatter.set_title("Online vs Offline time (Taiwan UTC+8)", fontweight="bold")
+    _hour_ticks(ax_scatter, "x", "TW (start)")
+    _hour_ticks(ax_scatter, "y", "TW (end)")
     ax_scatter.set_xlim(0, 24*60)
     ax_scatter.set_ylim(0, 24*60)
 
     # Timezone note
     fig.text(0.5, 0.01,
-             "Timezone note: All timestamps are Pacific Time (PDT UTC-7 Mar–Nov, PST UTC-8 Nov–Mar). "
-             "GMT columns computed with DST-aware offset. "
-             "Evening PT shifts (17:00–23:00 PT) = 00:00–06:00 GMT next day.",
+             "Timezone note: Taiwan UTC+8 (no DST). "
+             "Pacific: PDT UTC-7 (Mar–Nov), PST UTC-8 (Nov–Mar). "
+             "Evening TW shifts (08:00–15:00 TW) = 17:00–00:00 PT (prev day).",
              ha="center", fontsize=8, color="#555555",
              bbox=dict(boxstyle="round,pad=0.3", facecolor="#eeeeee", alpha=0.6))
 
@@ -274,7 +276,7 @@ def plot2(df: pd.DataFrame):
         ax_wd.text(rate + 0.5, i, f"{rate:.0f}% (n={total})", va="center", fontsize=8)
     ax_wd.set_xlim(0, 55)
 
-    # ── By online hour bucket (Taiwan) ────────────────────────────────────────
+    # ── By online hour bucket (Taiwan time) ──────────────────────────────────
     df2 = df.copy()
     df2["online_hour_bucket"] = (df2["online_hour"].dropna().astype(int) // 2 * 2)
     hr_stats = (
@@ -361,8 +363,8 @@ def plot3(df: pd.DataFrame):
         annot_kws={"size": 7},
         cbar_kws={"label": "Missing offline %", "shrink": 0.6},
     )
-    ax_heatmap.set_title("Missing offline rate (%) — weekday × login hour (Pacific Time)", fontweight="bold")
-    ax_heatmap.set_xlabel("Login hour (PT, 24h)")
+    ax_heatmap.set_title("Missing offline rate (%) — weekday × login hour (Taiwan UTC+8)", fontweight="bold")
+    ax_heatmap.set_xlabel("Login hour (TW, 24h)")
     ax_heatmap.set_ylabel("")
     ax_heatmap.tick_params(axis="x", rotation=0)
 
@@ -370,8 +372,8 @@ def plot3(df: pd.DataFrame):
     # For sessions that DO have offline we know the duration.
     # For sessions without offline we only know online_time — we can't compute duration.
     # We compare the online_time distribution between the two groups.
-    with_off  = df[df["has_offline"]]["online_min"].dropna()
-    without_off = df[~df["has_offline"]]["online_min"].dropna()
+    with_off    = df[df["has_offline"]]["online_min_tw"].dropna()
+    without_off = df[~df["has_offline"]]["online_min_tw"].dropna()
 
     bins = np.arange(0, 24 * 60 + 30, 60)
     ax_duration.hist(with_off,    bins=bins, alpha=0.65, label=f"Offline recorded (n={len(with_off)})",
@@ -379,7 +381,7 @@ def plot3(df: pd.DataFrame):
     ax_duration.hist(without_off, bins=bins, alpha=0.65, label=f"Offline missing (n={len(without_off)})",
                      color="#E84C4C", edgecolor="white", density=True)
     ax_duration.set_title("Login time: offline-recorded vs missing", fontweight="bold")
-    _hour_ticks(ax_duration, "x", "PT")
+    _hour_ticks(ax_duration, "x", "TW")
     ax_duration.set_ylabel("Density")
     ax_duration.legend(fontsize=8)
 
@@ -427,9 +429,9 @@ def plot3(df: pd.DataFrame):
         "\n"
         "DETECTION RISK SUMMARY\n"
         "=" * 85 + "\n"
-        "  HIGH   Late-night logins 23:00-01:00 PT  ->  missing rate spikes > 40%\n"
-        "  MED    Early-morning logins 01:00-07:00 PT  ->  short sessions, often no goodbye\n"
-        "  LOW    Afternoon logins 15:00-20:00 PT  ->  standard shift, usually has farewell\n"
+        "  HIGH   Late-night logins 06:00-09:00 TW  ->  missing rate spikes > 40%\n"
+        "  MED    Morning logins 09:00-14:00 TW  ->  short sessions, often no goodbye\n"
+        "  LOW    Afternoon logins 00:00-06:00 TW  ->  standard shift, usually has farewell\n"
         "\n"
         "  STRUCTURAL RISK: One-session-per-day rule collapses multi-shift days.\n"
         "  If the morning session had a clear logout but the evening didn't,\n"

@@ -40,18 +40,24 @@ _SYSTEM_PROMPT = """\
 你是一個工時記錄助理。以下是客服人員「曉寒」當天在工作群組的訊息紀錄（只有她的訊息）。
 所有時間均為美國太平洋時間（Pacific Time，PDT/PST）。
 
-你的任務：找出她當天的工作時間——整天只算【一段】。
+你的任務：找出她當天所有的上線/下線段落（含中途暫時離開），以計算實際工時。
 
 規則：
-1. online_time：她當天【第一次】宣告上線的時間（例：我上線、上線、回來上線）
-2. offline_time：她當天【最後一次】宣告下線或離開的時間（例：先下線、先下、先來下、我下線、離線）
-3. 中間所有的暫時離開、等等回來、再回來上線，全部忽略——不切割、不新增工作段
-4. 如果找不到明確的下線宣告，offline_time 填 null
+1. 上線宣告（例：我上線、上線、回來了、回來上線）→ 開始一個新的 segment（start）
+2. 下線宣告（例：先下線、先下、先來下、我下線、離線、先閃）→ 結束當前 segment（end）
+3. 每次中途離開再回來，算獨立的 segment；暫時離開的時間不計入工時
+4. 如果最後一個 segment 沒有下線宣告，end 填 null
 5. 如果當天完全沒有上線宣告，回傳空陣列 []
 
-回傳 JSON 陣列，最多一個元素：
+回傳 JSON 陣列，每天最多一個元素：
 [
-  {"date": "YYYY-MM-DD", "session": 1, "online_time": "HH:MM", "offline_time": "HH:MM"}
+  {
+    "date": "YYYY-MM-DD",
+    "segments": [
+      {"start": "HH:MM", "end": "HH:MM"},
+      {"start": "HH:MM", "end": null}
+    ]
+  }
 ]
 
 只回傳 JSON，不要 markdown 標記，不要任何其他文字。\
@@ -89,10 +95,11 @@ def _split_into_daily_chunks(
 def _merge_to_one_per_day(entries: list[TimecardEntry]) -> list[TimecardEntry]:
     """Collapse all entries for the same day into a single session.
 
-    online_time  = earliest non-null online_time across all entries for the day
-    offline_time = latest non-null offline_time across all entries (None if all null)
-    duration     = recomputed from the merged times
-    session      = always 1
+    online_time        = earliest non-null online_time
+    offline_time       = latest non-null offline_time (None if all null)
+    duration_hours     = sum of individual durations (net working time, excl. temp leave)
+    temp_leave_minutes = total span - net working time
+    session            = always 1
     """
     by_date: dict[date, list[TimecardEntry]] = {}
     for e in entries:
@@ -111,19 +118,21 @@ def _merge_to_one_per_day(entries: list[TimecardEntry]) -> list[TimecardEntry]:
         online_t = min(online_times) if online_times else None
         offline_t = max(offline_times) if offline_times else None
 
-        duration: Optional[float] = None
-        if online_t and offline_t:
-            delta = timedelta(
-                hours=offline_t.hour - online_t.hour,
-                minutes=offline_t.minute - online_t.minute,
-            )
-            duration = round(delta.total_seconds() / 3600, 2)
+        # Sum individual net durations rather than recomputing from span
+        dur_values = [e.duration_hours for e in day if e.duration_hours is not None]
+        duration: Optional[float] = round(sum(dur_values), 2) if dur_values else None
+
+        temp_leave: Optional[float] = None
+        if online_t and offline_t and duration is not None:
+            span_min = (offline_t.hour - online_t.hour) * 60 + (offline_t.minute - online_t.minute)
+            temp_leave = max(0.0, round(span_min - duration * 60, 1))
 
         merged = day[0]
         merged.session = 1
         merged.online_time = online_t
         merged.offline_time = offline_t
         merged.duration_hours = duration
+        merged.temp_leave_minutes = temp_leave
         result.append(merged)
 
     return result
@@ -145,8 +154,17 @@ def _renumber_sessions(entries: list[TimecardEntry]) -> list[TimecardEntry]:
 
 
 def _parse_response(raw: str, source_file: str) -> list[TimecardEntry]:
-    """Parse Gemini's JSON response into TimecardEntry objects."""
-    # Strip markdown code fences if present
+    """Parse Gemini's JSON response into TimecardEntry objects.
+
+    Expected format per item:
+      {"date": "YYYY-MM-DD", "segments": [{"start": "HH:MM", "end": "HH:MM"}, ...]}
+
+    Computes:
+      online_time        = earliest segment start
+      offline_time       = latest segment end (None if last segment has no end)
+      duration_hours     = sum of completed segment durations (net working time)
+      temp_leave_minutes = total span - net working time (gap between segments)
+    """
     text = raw.strip()
     text = re.sub(r"^```[a-z]*\n?", "", text)
     text = re.sub(r"\n?```$", "", text)
@@ -157,7 +175,6 @@ def _parse_response(raw: str, source_file: str) -> list[TimecardEntry]:
         logger.error("Failed to parse LLM response as JSON: %s\nRaw: %s", exc, text[:500])
         return []
 
-    # Normalise: LLM may return a single object instead of an array
     if isinstance(parsed, dict):
         items: list[dict] = [parsed]
     elif isinstance(parsed, list):
@@ -170,30 +187,45 @@ def _parse_response(raw: str, source_file: str) -> list[TimecardEntry]:
     for item in items:
         try:
             d = date.fromisoformat(item["date"])
-            online_t: Optional[time] = (
-                time.fromisoformat(item["online_time"]) if item.get("online_time") else None
-            )
-            offline_raw = item.get("offline_time")
-            offline_t: Optional[time] = (
-                time.fromisoformat(offline_raw) if offline_raw else None
-            )
-            duration: Optional[float] = None
-            if online_t and offline_t:
-                delta = timedelta(
-                    hours=offline_t.hour - online_t.hour,
-                    minutes=offline_t.minute - online_t.minute,
-                )
-                duration = round(delta.total_seconds() / 3600, 2)
+            segments = item.get("segments", [])
+
+            starts: list[time] = []
+            ends: list[time] = []
+            worked_minutes = 0.0
+
+            for seg in segments:
+                start_raw = seg.get("start")
+                end_raw = seg.get("end")
+                if not start_raw:
+                    continue
+                st = time.fromisoformat(start_raw)
+                starts.append(st)
+                if end_raw:
+                    en = time.fromisoformat(end_raw)
+                    ends.append(en)
+                    seg_min = (en.hour - st.hour) * 60 + (en.minute - st.minute)
+                    worked_minutes += seg_min
+
+            online_t: Optional[time] = min(starts) if starts else None
+            offline_t: Optional[time] = max(ends) if ends else None
+
+            duration: Optional[float] = round(worked_minutes / 60, 2) if worked_minutes > 0 else None
+
+            temp_leave: Optional[float] = None
+            if online_t and offline_t and duration is not None:
+                span_min = (offline_t.hour - online_t.hour) * 60 + (offline_t.minute - online_t.minute)
+                temp_leave = max(0.0, round(span_min - worked_minutes, 1))
 
             weekday = item.get("weekday", d.strftime("%A"))
             entries.append(
                 TimecardEntry(
                     date=d,
                     weekday=weekday,
-                    session=int(item["session"]),
+                    session=1,
                     online_time=online_t,
                     offline_time=offline_t,
                     duration_hours=duration,
+                    temp_leave_minutes=temp_leave,
                     source_file=source_file,
                     notes=item.get("notes", ""),
                 )

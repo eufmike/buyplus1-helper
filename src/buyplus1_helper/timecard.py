@@ -12,11 +12,14 @@ _COLUMNS = [
     "date",
     "weekday",
     "session",
-    "online_time",
-    "offline_time",
-    "online_time_gmt",
-    "offline_time_gmt",
-    "duration_hours",
+    "online_time",         # Pacific Time (raw)
+    "offline_time",        # Pacific Time (raw)
+    "online_time_tw",      # Taiwan UTC+8
+    "offline_time_tw",     # Taiwan UTC+8
+    "online_time_gmt",     # GMT/UTC
+    "offline_time_gmt",    # GMT/UTC
+    "duration_hours",      # net working hours (excl. temp leave)
+    "temp_leave_minutes",  # total temp leave duration
     "source_file",
     "notes",
 ]
@@ -41,11 +44,11 @@ def _pt_utc_offset(d: date) -> int:
     return -8       # PST
 
 
-def _pt_to_gmt(time_str: str, d: date) -> str:
-    """Convert a 'HH:MM' Pacific time string to 'HH:MM' GMT (UTC+0).
+def _pt_to_utc_offset(time_str: str, d: date, target_offset: int) -> str:
+    """Convert a 'HH:MM' Pacific time string to another UTC offset.
 
-    Returns '' if time_str is empty/NaN.  The result wraps within 24 hours
-    (day boundary crossing is not tracked in the output string).
+    target_offset: hours east of UTC (e.g. 0 for GMT, 8 for Taiwan).
+    Returns '' if time_str is empty/NaN. Wraps within 24 hours.
     """
     if not time_str or pd.isna(time_str):
         return ""
@@ -53,10 +56,19 @@ def _pt_to_gmt(time_str: str, d: date) -> str:
         h, m = map(int, str(time_str).split(":"))
     except ValueError:
         return ""
-    offset = _pt_utc_offset(d)          # e.g., -7 for PDT
-    gmt_minutes = (h * 60 + m) - (offset * 60)   # subtract negative = add
-    gmt_minutes %= 24 * 60
-    return f"{gmt_minutes // 60:02d}:{gmt_minutes % 60:02d}"
+    pt_offset = _pt_utc_offset(d)          # e.g., -7 for PDT
+    total_minutes = (h * 60 + m) - (pt_offset * 60) + (target_offset * 60)
+    total_minutes %= 24 * 60
+    return f"{total_minutes // 60:02d}:{total_minutes % 60:02d}"
+
+
+def _pt_to_gmt(time_str: str, d: date) -> str:
+    return _pt_to_utc_offset(time_str, d, target_offset=0)
+
+
+def _pt_to_tw(time_str: str, d: date) -> str:
+    """Convert 'HH:MM' Pacific time to Taiwan time (UTC+8, no DST)."""
+    return _pt_to_utc_offset(time_str, d, target_offset=8)
 
 
 def build_dataframe(entries: list[TimecardEntry]) -> pd.DataFrame:
@@ -75,11 +87,14 @@ def build_dataframe(entries: list[TimecardEntry]) -> pd.DataFrame:
                 "date": e.date.isoformat(),
                 "weekday": e.weekday,
                 "session": e.session,
-                "online_time":  online_str,
-                "offline_time": offline_str,
+                "online_time":      online_str,
+                "offline_time":     offline_str,
+                "online_time_tw":   _pt_to_tw(online_str,  e.date),
+                "offline_time_tw":  _pt_to_tw(offline_str, e.date),
                 "online_time_gmt":  _pt_to_gmt(online_str,  e.date),
                 "offline_time_gmt": _pt_to_gmt(offline_str, e.date),
                 "duration_hours": e.duration_hours if e.duration_hours is not None else "",
+                "temp_leave_minutes": e.temp_leave_minutes if e.temp_leave_minutes is not None else "",
                 "source_file": e.source_file,
                 "notes": e.notes,
             }
@@ -92,8 +107,8 @@ def load_master(path: Path) -> pd.DataFrame:
     if not path.exists():
         return pd.DataFrame(columns=_COLUMNS)
     df = pd.read_csv(path, encoding="utf-8-sig", dtype=str).fillna("")
-    # Back-fill GMT columns for CSVs written before this column was added
-    for col in ("online_time_gmt", "offline_time_gmt"):
+    # Back-fill columns added after initial release
+    for col in ("online_time_tw", "offline_time_tw", "online_time_gmt", "offline_time_gmt", "temp_leave_minutes"):
         if col not in df.columns:
             df[col] = ""
     return df[_COLUMNS]

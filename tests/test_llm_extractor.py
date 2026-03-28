@@ -170,11 +170,14 @@ class TestMergeToOnePerDay:
         assert result[0].date == D1
         assert result[1].date == D2
 
-    def test_duration_recomputed_after_merge(self):
+    def test_duration_summed_after_merge(self):
+        """duration_hours = sum of individual durations (net), not total span."""
         entries = [
-            _entry(D1, time(17, 0), time(20, 0)),
-            _entry(D1, time(21, 0), time(23, 0)),
+            _entry(D1, time(17, 0), time(20, 0)),   # 3h
+            _entry(D1, time(21, 0), time(23, 0)),   # 2h
         ]
         result = _merge_to_one_per_day(entries)
-        # online=17:00 offline=23:00 → 6.0 hours
-        assert result[0].duration_hours == 6.0
+        # Net working time: 3 + 2 = 5h (not the 6h span)
+        assert result[0].duration_hours == 5.0
+        # Temp leave: span(6h) - net(5h) = 60 min
+        assert result[0].temp_leave_minutes == 60.0
