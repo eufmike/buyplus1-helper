@@ -2,7 +2,7 @@
 from datetime import date, time
 from pathlib import Path
 
-from buyplus1_helper.extractor import _is_offline, _is_online, extract_sessions
+from buyplus1_helper.extractor import _is_ambiguous_offline, _is_offline, _is_online, extract_sessions
 from buyplus1_helper.models import ChatMessage
 from buyplus1_helper.parser import parse_file
 
@@ -93,8 +93,10 @@ def test_offline_short_xia_particle():
     assert _is_offline(_msg("曉寒", "先下喔"))
 
 
-def test_offline_likai():
-    assert _is_offline(_msg("曉寒", "我先離開一下"))
+def test_offline_likai_is_ambiguous_not_definitive():
+    # 離開 is ambiguous — requires LLM, not auto-classified by _is_offline
+    assert not _is_offline(_msg("曉寒", "我先離開一下"))
+    assert _is_ambiguous_offline(_msg("曉寒", "我先離開一下"))
 
 
 def test_offline_lixian():
@@ -103,6 +105,13 @@ def test_offline_lixian():
 
 def test_offline_activity():
     assert _is_offline(_msg("曉寒", "我先去接小孩"))
+
+
+def test_offline_xian_lai_xia():
+    # 先來下 (without 線) — NOT matched by 先下 because chars are 先→來→下
+    assert _is_offline(_msg("曉寒", "我先來下，等等下午再來上"))
+    assert _is_offline(_msg("曉寒", "先來下～"))
+    assert _is_offline(_msg("曉寒", "我先來下"))
 
 
 def test_offline_typo_xia():

@@ -30,14 +30,15 @@ E3 = _entry(date(2023, 9, 10), 1, time(16, 53), time(22, 4))
 
 def test_build_dataframe_shape():
     df = build_dataframe([E1, E2, E3])
-    assert df.shape == (3, 8)
+    assert df.shape == (3, 10)
 
 
 def test_build_dataframe_columns():
     df = build_dataframe([E1])
     assert list(df.columns) == [
         "date", "weekday", "session", "online_time",
-        "offline_time", "duration_hours", "source_file", "notes",
+        "offline_time", "online_time_gmt", "offline_time_gmt",
+        "duration_hours", "source_file", "notes",
     ]
 
 
@@ -47,6 +48,10 @@ def test_build_dataframe_values():
     assert row["date"] == "2023-09-07"
     assert row["online_time"] == "17:08"
     assert row["offline_time"] == "20:30"
+    # 2023-09-07 is PDT (UTC-7); 17:08 PT + 7h = 00:08 UTC (next day, wraps mod 24)
+    assert row["online_time_gmt"] == "00:08"
+    # 20:30 PT + 7h = 03:30 UTC
+    assert row["offline_time_gmt"] == "03:30"
 
 
 def test_load_master_missing_returns_empty(tmp_path):

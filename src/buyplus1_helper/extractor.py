@@ -96,28 +96,34 @@ def _is_ambiguous_online(msg: ChatMessage) -> bool:
     return any(pat in content for pat in _AMBIGUOUS_PATTERNS)
 
 
-# Substrings whose presence (in 曉寒's message) marks a departure.
-# Order matters for readability; all are checked with `in`.
+# Substrings whose presence (in 曉寒's message) unambiguously marks a departure.
 _OFFLINE_KEYWORDS: tuple[str, ...] = (
-    "下線",     # canonical: 先下線, 我先下線, 下線囉, …
+    "下線",     # canonical: 先下線, 我先下線, 下線囉, 來下線, …
     "離線",     # alternative: 先離線一下, 我先離線, …
-    "離開",     # common in 2024–2026: 我先離開一下, 先離開, …
     "先下",     # short form: 我先下, 先下喔, 先下囉, 先下一下, …
+    "先來下",   # short form without 線: 我先來下, 先來下～, 我先來下，等等回來, …
     "下囉",     # sentence-final: 好啦～那我下囉, 先下囉, …
     "下喔",     # sentence-final with 喔: 先下喔, …
     "去接小孩", # specific activity: 我先去接小孩, …
     "先來嚇了", # typo for 先來下了 (autocorrect artefact)
+    "先下縣",   # typo for 先下線 (autocorrect artefact)
 )
 
 # Substrings that cancel an otherwise-matched offline keyword.
-# E.g. 來下載 contains 來下 but is a download, not a logout.
 _OFFLINE_EXCLUSIONS: tuple[str, ...] = (
-    "來下載",   # download
-    "先下午",   # 先下午…
+    "來下載",   # download — not a logout
+    "先下午",   # time expression — not a logout
+    "先來下單", # placing an order — not a logout
 )
+
+# Patterns that are ambiguous — could be "stepping away briefly to do a task"
+# (working) or "actually logging off" (offline). Route to LLM.
+# Example: 「我先離開一下確認訂單」 vs. 「我先離開」
+_AMBIGUOUS_OFFLINE_PATTERNS: tuple[str, ...] = ("離開",)
 
 
 def _is_offline(msg: ChatMessage) -> bool:
+    """Return True if the message is a definitive logout (no LLM needed)."""
     if msg.sender != TARGET_SENDER:
         return False
     content = msg.content
@@ -125,6 +131,20 @@ def _is_offline(msg: ChatMessage) -> bool:
         if excl in content:
             return False
     return any(kw in content for kw in _OFFLINE_KEYWORDS)
+
+
+def _is_ambiguous_offline(msg: ChatMessage) -> bool:
+    """Return True if the message needs LLM classification (ambiguous departure)."""
+    if msg.sender != TARGET_SENDER:
+        return False
+    content = msg.content
+    # Already handled as definitive offline
+    for excl in _OFFLINE_EXCLUSIONS:
+        if excl in content:
+            return False
+    if any(kw in content for kw in _OFFLINE_KEYWORDS):
+        return False
+    return any(pat in content for pat in _AMBIGUOUS_OFFLINE_PATTERNS)
 
 
 def extract_sessions(
@@ -162,6 +182,9 @@ def extract_sessions(
             elif llm_validator and _is_ambiguous_online(msg):
                 if llm_validator.is_online_now(msg.content):
                     events.append(("online", msg))
+            elif llm_validator and _is_ambiguous_offline(msg):
+                if llm_validator.is_offline_now(msg.content):
+                    events.append(("offline", msg))
 
         # Pair greedily: online → offline → online → offline …
         session_num = 0
