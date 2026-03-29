@@ -3,17 +3,18 @@
 Instead of keyword rules, sends 曉寒's messages to Gemini and asks it to
 identify work sessions directly.  The design is intentionally simple:
 
-- One session per calendar day: online_time = first login, offline_time = last
-  logout.  Temporary departures and returns within the same day are ignored.
-- Messages are split into per-day chunks and processed in parallel via
+- One session per calendar day in Taiwan Time (UTC+8).
+- Messages from the LINE export (Pacific Time device clock) are converted to
+  Taiwan Time before grouping and before being sent to the LLM.  This avoids
+  midnight-crossing sessions: a session that starts at 22:00 PT is 14:00 TW
+  the next calendar day — entirely within one TW day.
+- TimecardEntry.online_time / offline_time store Taiwan Time directly.
+- Messages are split into per-day (TW) chunks and processed in parallel via
   ThreadPoolExecutor.
 - A post-processing step (_merge_to_one_per_day) collapses any multiple
   sessions the LLM returns for the same day into a single entry.
 - A state file alongside the master CSV records the last fully-processed date
   so that subsequent runs only send the newly unseen portion of a chat export.
-
-All timestamps are Taiwan time (Asia/Taipei, UTC+8) as recorded in the LINE
-export — no conversion is required.
 """
 from __future__ import annotations
 
@@ -29,6 +30,7 @@ from typing import Optional
 
 from .models import ChatMessage, TimecardEntry
 from .llm_validator import _load_env
+from .timecard import _pt_utc_offset
 
 logger = logging.getLogger(__name__)
 
@@ -36,9 +38,41 @@ TARGET_SENDER = "曉寒"
 
 _DEFAULT_MODEL = "gemini-2.5-flash-lite"
 
+
+def _messages_to_tw(messages: list[ChatMessage]) -> list[ChatMessage]:
+    """Convert ChatMessage timestamps from Pacific Time to Taiwan Time (UTC+8).
+
+    The LINE export uses the device's local clock (Pacific Time).  Converting
+    to TW before chunking means all of 曉寒's evening sessions (e.g. 22:xx PT)
+    become afternoon sessions (14:xx TW the next calendar day), eliminating
+    midnight-crossing sessions entirely.
+    """
+    result: list[ChatMessage] = []
+    weekday_names = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"]
+    for m in messages:
+        if m.timestamp is None:
+            result.append(m)
+            continue
+        pt_offset = _pt_utc_offset(m.date)   # -7 (PDT) or -8 (PST)
+        # PT → UTC → TW(+8)
+        total_min = m.timestamp.hour * 60 + m.timestamp.minute
+        total_min -= pt_offset * 60           # to UTC
+        total_min += 8 * 60                   # to TW
+        day_delta = total_min // (24 * 60)    # 0 (same day) or 1 (next day)
+        total_min %= 24 * 60
+        tw_time = time(total_min // 60, total_min % 60)
+        tw_date = m.date + timedelta(days=day_delta)
+        result.append(m.model_copy(update={
+            "date": tw_date,
+            "weekday": weekday_names[tw_date.weekday()],
+            "timestamp": tw_time,
+        }))
+    return result
+
+
 _SYSTEM_PROMPT = """\
 你是一個工時記錄助理。以下是客服人員「曉寒」當天在工作群組的訊息紀錄（只有她的訊息）。
-所有時間均為美國太平洋時間（Pacific Time，PDT/PST）。
+所有時間均為台灣時間（Asia/Taipei，UTC+8）。
 
 你的任務：找出她當天所有的上線/下線段落（含中途暫時離開），以計算實際工時。
 
@@ -125,6 +159,8 @@ def _merge_to_one_per_day(entries: list[TimecardEntry]) -> list[TimecardEntry]:
         temp_leave: Optional[float] = None
         if online_t and offline_t and duration is not None:
             span_min = (offline_t.hour - online_t.hour) * 60 + (offline_t.minute - online_t.minute)
+            if span_min < 0:  # cross-midnight session
+                span_min += 24 * 60
             temp_leave = max(0.0, round(span_min - duration * 60, 1))
 
         merged = day[0]
@@ -204,6 +240,8 @@ def _parse_response(raw: str, source_file: str) -> list[TimecardEntry]:
                     en = time.fromisoformat(end_raw)
                     ends.append(en)
                     seg_min = (en.hour - st.hour) * 60 + (en.minute - st.minute)
+                    if seg_min < 0:  # cross-midnight segment
+                        seg_min += 24 * 60
                     worked_minutes += seg_min
 
             online_t: Optional[time] = min(starts) if starts else None
@@ -214,6 +252,8 @@ def _parse_response(raw: str, source_file: str) -> list[TimecardEntry]:
             temp_leave: Optional[float] = None
             if online_t and offline_t and duration is not None:
                 span_min = (offline_t.hour - online_t.hour) * 60 + (offline_t.minute - online_t.minute)
+                if span_min < 0:  # cross-midnight session
+                    span_min += 24 * 60
                 temp_leave = max(0.0, round(span_min - worked_minutes, 1))
 
             weekday = item.get("weekday", d.strftime("%A"))
@@ -272,7 +312,7 @@ class LLMExtractor:
                          Pass the day after the last already-processed date for
                          incremental runs.
         """
-        # Keep only 曉寒's messages, optionally from a start date
+        # Keep only 曉寒's messages, optionally from a start date (PT dates)
         xh = [
             m for m in messages
             if m.sender == TARGET_SENDER
@@ -281,6 +321,11 @@ class LLMExtractor:
         if not xh:
             logger.info("No new messages to process.")
             return []
+
+        # Convert PT timestamps → Taiwan Time so that daily chunks are by TW
+        # date.  Evening PT sessions (22:xx) become afternoon TW sessions
+        # (14:xx next TW day), eliminating midnight-crossing sessions.
+        xh = _messages_to_tw(xh)
 
         # Group into monthly batches for logging, then process each month in parallel daily chunks
         def month_key(m: ChatMessage) -> tuple[int, int]:
@@ -304,7 +349,11 @@ class LLMExtractor:
     def _process_month_parallel(
         self, messages: list[ChatMessage], source_file: str
     ) -> list[TimecardEntry]:
-        """Process one month's messages by splitting into daily chunks, run in parallel."""
+        """Process one month's messages by splitting into daily chunks, run in parallel.
+
+        By the time this is called, messages are already in Taiwan Time, so
+        daily chunks are clean TW calendar days with no midnight crossings.
+        """
         chunks = _split_into_daily_chunks(messages)
 
         if len(chunks) == 1:

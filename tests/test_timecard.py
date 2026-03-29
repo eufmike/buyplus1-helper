@@ -23,9 +23,19 @@ def _entry(d: date, session: int, on: time, off: time, src: str = "test.txt") ->
     )
 
 
-E1 = _entry(date(2023, 9, 7), 1, time(17, 8), time(20, 30))
-E2 = _entry(date(2023, 9, 7), 2, time(22, 1), time(23, 35))
-E3 = _entry(date(2023, 9, 10), 1, time(16, 53), time(22, 4))
+# Entries use Taiwan Time (UTC+8) directly — the LLM extractor performs the
+# PT→TW conversion before creating TimecardEntry objects.
+#
+# Original PT times for reference (2023-09-07 / 2023-09-10 are both PDT, UTC-7):
+#   PT 17:08 on Sep 7  → TW 08:08 on Sep 8   (+15h PDT→TW)
+#   PT 20:30 on Sep 7  → TW 11:30 on Sep 8
+#   PT 22:01 on Sep 7  → TW 13:01 on Sep 8
+#   PT 23:35 on Sep 7  → TW 14:35 on Sep 8
+#   PT 16:53 on Sep 10 → TW 07:53 on Sep 11
+#   PT 22:04 on Sep 10 → TW 13:04 on Sep 11
+E1 = _entry(date(2023, 9, 8), 1, time(8, 8),  time(11, 30))
+E2 = _entry(date(2023, 9, 8), 2, time(13, 1), time(14, 35))
+E3 = _entry(date(2023, 9, 11), 1, time(7, 53), time(13, 4))
 
 
 def test_build_dataframe_shape():
@@ -48,17 +58,15 @@ def test_build_dataframe_columns():
 def test_build_dataframe_values():
     df = build_dataframe([E1])
     row = df.iloc[0]
-    assert row["date"] == "2023-09-07"
-    assert row["online_time"] == "17:08"
-    assert row["offline_time"] == "20:30"
-    # 2023-09-07 is PDT (UTC-7); 17:08 PT + 7h = 00:08 GMT
-    assert row["online_time_gmt"] == "00:08"
-    # 20:30 PT + 7h = 03:30 GMT
-    assert row["offline_time_gmt"] == "03:30"
-    # 17:08 PT + 15h (PDT→TW) = 08:08 TW
+    assert row["date"] == "2023-09-08"
+    # online_time and online_time_tw are both TW (same value)
+    assert row["online_time"] == "08:08"
     assert row["online_time_tw"] == "08:08"
-    # 20:30 PT + 15h = 11:30 TW
+    assert row["offline_time"] == "11:30"
     assert row["offline_time_tw"] == "11:30"
+    # GMT = TW - 8h (no DST needed, TW is fixed UTC+8)
+    assert row["online_time_gmt"] == "00:08"
+    assert row["offline_time_gmt"] == "03:30"
 
 
 def test_load_master_missing_returns_empty(tmp_path):
@@ -71,7 +79,7 @@ def test_save_and_load_roundtrip(tmp_path):
     path = tmp_path / "master.csv"
     save_master(df, path)
     loaded = load_master(path)
-    assert list(loaded["date"]) == ["2023-09-07", "2023-09-07"]
+    assert list(loaded["date"]) == ["2023-09-08", "2023-09-08"]
     assert list(loaded["session"]) == ["1", "2"]
 
 
@@ -90,12 +98,12 @@ def test_merge_preserves_existing():
 
 
 def test_merge_overwrites_same_key():
-    master = build_dataframe([E1])  # session 1 on Sep 7
-    new_entry = _entry(date(2023, 9, 7), 1, time(17, 0), time(21, 0), src="new.txt")
+    master = build_dataframe([E1])  # session 1 on Sep 8 TW
+    new_entry = _entry(date(2023, 9, 8), 1, time(8, 0), time(13, 0), src="new.txt")
     new = build_dataframe([new_entry])
     result = merge(new, master)
     assert len(result) == 1
-    assert result.iloc[0]["online_time"] == "17:00"
+    assert result.iloc[0]["online_time"] == "08:00"
     assert result.iloc[0]["source_file"] == "new.txt"
 
 
@@ -103,4 +111,4 @@ def test_merge_sorted_by_date_session():
     master = build_dataframe([E3])
     new = build_dataframe([E1, E2])
     result = merge(new, master)
-    assert list(result["date"]) == ["2023-09-07", "2023-09-07", "2023-09-10"]
+    assert list(result["date"]) == ["2023-09-08", "2023-09-08", "2023-09-11"]

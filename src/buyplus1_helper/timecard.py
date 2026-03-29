@@ -12,10 +12,10 @@ _COLUMNS = [
     "date",
     "weekday",
     "session",
-    "online_time",         # Pacific Time (raw)
-    "offline_time",        # Pacific Time (raw)
-    "online_time_tw",      # Taiwan UTC+8
-    "offline_time_tw",     # Taiwan UTC+8
+    "online_time",         # Taiwan Time (UTC+8) — primary
+    "offline_time",        # Taiwan Time (UTC+8) — primary
+    "online_time_tw",      # Taiwan UTC+8 (same as online_time, kept for compatibility)
+    "offline_time_tw",     # Taiwan UTC+8 (same as offline_time, kept for compatibility)
     "online_time_gmt",     # GMT/UTC
     "offline_time_gmt",    # GMT/UTC
     "duration_hours",      # net working hours (excl. temp leave)
@@ -71,12 +71,29 @@ def _pt_to_tw(time_str: str, d: date) -> str:
     return _pt_to_utc_offset(time_str, d, target_offset=8)
 
 
+def _tw_to_gmt(time_str: str) -> str:
+    """Convert 'HH:MM' Taiwan time (UTC+8) to GMT (UTC+0).
+
+    Taiwan has no DST so this is always a fixed -8h shift.
+    Returns '' if time_str is empty/NaN. Wraps within 24 hours.
+    """
+    if not time_str or pd.isna(time_str):
+        return ""
+    try:
+        h, m = map(int, str(time_str).split(":"))
+    except ValueError:
+        return ""
+    total_minutes = (h * 60 + m) - (8 * 60)   # TW(+8) → UTC(0)
+    total_minutes %= 24 * 60
+    return f"{total_minutes // 60:02d}:{total_minutes % 60:02d}"
+
+
 def build_dataframe(entries: list[TimecardEntry]) -> pd.DataFrame:
     """Convert a list of TimecardEntry objects to a DataFrame.
 
-    Timestamps in the source data are Pacific time (device local clock).
-    online_time_gmt / offline_time_gmt are the UTC equivalents, accounting
-    for PDT (UTC-7) and PST (UTC-8) transitions.
+    TimecardEntry.online_time / offline_time are Taiwan Time (UTC+8).
+    online_time and online_time_tw store the same TW value; online_time_gmt
+    is derived by subtracting 8 hours (TW has no DST).
     """
     rows = []
     for e in entries:
@@ -89,10 +106,10 @@ def build_dataframe(entries: list[TimecardEntry]) -> pd.DataFrame:
                 "session": e.session,
                 "online_time":      online_str,
                 "offline_time":     offline_str,
-                "online_time_tw":   _pt_to_tw(online_str,  e.date),
-                "offline_time_tw":  _pt_to_tw(offline_str, e.date),
-                "online_time_gmt":  _pt_to_gmt(online_str,  e.date),
-                "offline_time_gmt": _pt_to_gmt(offline_str, e.date),
+                "online_time_tw":   online_str,           # same as online_time (both TW)
+                "offline_time_tw":  offline_str,          # same as offline_time (both TW)
+                "online_time_gmt":  _tw_to_gmt(online_str),
+                "offline_time_gmt": _tw_to_gmt(offline_str),
                 "duration_hours": e.duration_hours if e.duration_hours is not None else "",
                 "temp_leave_minutes": e.temp_leave_minutes if e.temp_leave_minutes is not None else "",
                 "source_file": e.source_file,

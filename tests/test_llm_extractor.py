@@ -7,6 +7,8 @@ import pytest
 from buyplus1_helper.llm_extractor import (
     _format_batch,
     _merge_to_one_per_day,
+    _messages_to_tw,
+    _parse_response,
     _split_into_daily_chunks,
 )
 from buyplus1_helper.models import ChatMessage, TimecardEntry
@@ -181,3 +183,83 @@ class TestMergeToOnePerDay:
         assert result[0].duration_hours == 5.0
         # Temp leave: span(6h) - net(5h) = 60 min
         assert result[0].temp_leave_minutes == 60.0
+
+
+# ---------------------------------------------------------------------------
+# _parse_response — cross-midnight sessions
+# ---------------------------------------------------------------------------
+
+class TestParseResponseCrossMidnight:
+    """Verify that cross-midnight segment arithmetic works correctly."""
+
+    def test_cross_midnight_segment_duration(self):
+        """22:06→00:34 segment should compute duration as 2h28m (148 min), not negative."""
+        raw = '[{"date": "2026-02-07", "segments": [{"start": "22:06", "end": "00:34"}]}]'
+        entries = _parse_response(raw, "test")
+        assert len(entries) == 1
+        e = entries[0]
+        assert e.date == date(2026, 2, 7)
+        assert e.online_time == time(22, 6)
+        assert e.offline_time == time(0, 34)
+        # 22:06 → 00:34 crosses midnight: 148 minutes = 2.47h
+        assert e.duration_hours == round(148 / 60, 2)
+
+    def test_cross_midnight_temp_leave_zero(self):
+        """Single segment spanning midnight has zero temp_leave."""
+        raw = '[{"date": "2026-02-07", "segments": [{"start": "22:06", "end": "00:34"}]}]'
+        entries = _parse_response(raw, "test")
+        assert entries[0].temp_leave_minutes == 0.0
+
+    def test_cross_midnight_with_earlier_segment(self):
+        """Day session + late-night cross-midnight session: duration = sum of both."""
+        raw = '[{"date": "2026-02-07", "segments": [{"start": "17:00", "end": "20:00"}, {"start": "22:00", "end": "00:30"}]}]'
+        entries = _parse_response(raw, "test")
+        assert len(entries) == 1
+        e = entries[0]
+        # 17:00→20:00 = 180 min; 22:00→00:30 crosses midnight = 150 min; total = 330 min
+        assert e.duration_hours == round(330 / 60, 2)
+
+
+# ---------------------------------------------------------------------------
+# _messages_to_tw — PT→TW conversion eliminates midnight crossings
+# ---------------------------------------------------------------------------
+
+class TestMessagesToTw:
+    """_messages_to_tw converts PT dates/times to TW, removing midnight crossings."""
+
+    def test_pst_evening_maps_to_next_tw_day(self):
+        """22:06 PT (PST, Feb = UTC-8) → 14:06 TW the next calendar day."""
+        # D1 = date(2023, 10, 3) is PDT; use a PST date for clarity
+        pst_date = date(2026, 2, 7)   # Feb = PST (UTC-8)
+        msgs = [_msg("曉寒", "上線上架", pst_date, time(22, 6))]
+        tw_msgs = _messages_to_tw(msgs)
+        assert tw_msgs[0].date == date(2026, 2, 8)     # next calendar day in TW
+        assert tw_msgs[0].timestamp == time(14, 6)     # 22:06 + 16h = 38:06 → 14:06
+
+    def test_pst_offline_same_tw_day(self):
+        """00:34 PT (PST, Feb 8) → 16:34 TW on Feb 8 — same TW day as the online above."""
+        pst_date = date(2026, 2, 8)
+        msgs = [_msg("曉寒", "下線", pst_date, time(0, 34))]
+        tw_msgs = _messages_to_tw(msgs)
+        assert tw_msgs[0].date == date(2026, 2, 8)     # same TW day
+        assert tw_msgs[0].timestamp == time(16, 34)    # 00:34 + 16h = 16:34
+
+    def test_pdt_evening_maps_to_next_tw_day(self):
+        """17:08 PT (PDT, Sep 7 = UTC-7) → 08:08 TW on Sep 8."""
+        pdt_date = date(2023, 9, 7)   # Sep = PDT (UTC-7)
+        msgs = [_msg("曉寒", "我上線", pdt_date, time(17, 8))]
+        tw_msgs = _messages_to_tw(msgs)
+        assert tw_msgs[0].date == date(2023, 9, 8)
+        assert tw_msgs[0].timestamp == time(8, 8)      # 17:08 + 15h = 32:08 → 08:08
+
+    def test_no_midnight_crossing_after_conversion(self):
+        """After PT→TW, both online (22:06) and offline (00:34) land on the same TW day."""
+        pst_date = date(2026, 2, 7)
+        msgs = [
+            _msg("曉寒", "上線上架", pst_date,                  time(22, 6)),
+            _msg("曉寒", "下線",     pst_date + timedelta(days=1), time(0, 34)),
+        ]
+        tw_msgs = _messages_to_tw(msgs)
+        assert tw_msgs[0].date == tw_msgs[1].date   # both on Feb 8 TW
+        chunks = _split_into_daily_chunks(tw_msgs)
+        assert len(chunks) == 1                     # one chunk, no crossing
